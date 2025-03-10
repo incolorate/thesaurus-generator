@@ -6,10 +6,13 @@ from nltk.stem import PorterStemmer
 from nltk.corpus import wordnet
 import nltk
 import re
+import gc
+from tqdm import tqdm
 
 class ThesaurusGenerator:
-    def __init__(self, similarity_threshold=0.75):
+    def __init__(self, similarity_threshold=0.75, batch_size=1000):
         self.similarity_threshold = similarity_threshold
+        self.batch_size = batch_size
         self.ps = PorterStemmer()
         
         # Download required NLTK data
@@ -32,8 +35,8 @@ class ThesaurusGenerator:
                 processed_terms.append(term)
         return processed_terms
 
-    def find_similar_terms(self, terms):
-        """Find similar terms using TF-IDF and cosine similarity"""
+    def find_similar_terms_batched(self, terms):
+        """Find similar terms using TF-IDF and cosine similarity in batches"""
         if not terms:
             print("Warning: No terms provided to process")
             return []
@@ -44,30 +47,62 @@ class ThesaurusGenerator:
             print("Warning: No terms remained after preprocessing")
             return []
         
-        # Create TF-IDF vectors
+        # Create TF-IDF vectors for all terms
+        print("Creating TF-IDF vectors...")
         vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(2, 3))
         tfidf_matrix = vectorizer.fit_transform(processed_terms)
         
-        # Calculate cosine similarity
-        similarity_matrix = cosine_similarity(tfidf_matrix)
-        
-        # Find groups of similar terms
+        # Process in batches
         similar_groups = []
         used_terms = set()
+        num_terms = len(terms)
         
-        for i in range(len(terms)):
-            if i not in used_terms:
-                group = {i}
-                used_terms.add(i)
+        # Process in batches - outer loop for reference terms
+        for i in tqdm(range(0, num_terms, self.batch_size), desc="Processing batches"):
+            batch_end = min(i + self.batch_size, num_terms)
+            batch_indices = list(range(i, batch_end))
+            
+            # Skip terms that are already used
+            batch_indices = [idx for idx in batch_indices if idx not in used_terms]
+            
+            if not batch_indices:
+                continue
                 
-                # Find similar terms
-                for j in range(i + 1, len(terms)):
-                    if j not in used_terms and similarity_matrix[i][j] > self.similarity_threshold:
-                        group.add(j)
-                        used_terms.add(j)
+            # Get batch vectors
+            batch_vectors = tfidf_matrix[batch_indices]
+            
+            # Calculate similarities for this batch against all remaining terms
+            remaining_indices = [j for j in range(num_terms) if j not in used_terms]
+            
+            if not remaining_indices:
+                break
+                
+            remaining_vectors = tfidf_matrix[remaining_indices]
+            
+            # Calculate cosine similarity between this batch and remaining terms
+            batch_similarities = cosine_similarity(batch_vectors, remaining_vectors)
+            
+            # Map indices back to original positions
+            for batch_idx, orig_i in enumerate(batch_indices):
+                if orig_i in used_terms:
+                    continue
+                    
+                group = {orig_i}
+                used_terms.add(orig_i)
+                
+                # Find similar terms above threshold
+                for rem_idx, orig_j in enumerate(remaining_indices):
+                    if orig_j > orig_i and orig_j not in used_terms:
+                        if batch_similarities[batch_idx, rem_idx] > self.similarity_threshold:
+                            group.add(orig_j)
+                            used_terms.add(orig_j)
                 
                 if len(group) > 1:
                     similar_groups.append([terms[idx] for idx in group])
+                    
+            # Free memory
+            del batch_vectors, remaining_vectors, batch_similarities
+            gc.collect()
         
         return similar_groups
 
@@ -77,8 +112,8 @@ class ThesaurusGenerator:
         keywords = [k.strip() for k in keywords_string.split(',') if k.strip()]
         print(f"Processing {len(keywords)} keywords...")
         
-        # Find similar terms
-        similar_groups = self.find_similar_terms(keywords)
+        # Find similar terms with batching
+        similar_groups = self.find_similar_terms_batched(keywords)
         print(f"Found {len(similar_groups)} groups of similar terms")
         
         # Generate thesaurus content
@@ -102,17 +137,25 @@ class ThesaurusGenerator:
         return len(thesaurus_content)
 
 def main():
-    with open('test.txt', 'r') as file:
-    # Read the file and remove any extra spaces or newlines
-        keywords = file.read().replace('\n', ',').replace('\r', '').strip(',')
-
-    # Create the string in the desired format
-    keywords_string = f'""" {keywords} """'
-    # Your keywords string
+    # Read keywords from file in chunks to reduce memory usage
+    keywords = []
+    chunk_size = 10000  # Adjust based on your file size and available memory
     
-    # Generate thesaurus file
-    generator = ThesaurusGenerator(similarity_threshold=0.75)
-    num_entries = generator.generate_thesaurus_file(keywords_string, 'vosviewer_thesaurus.txt')
+    with open('test.txt', 'r') as file:
+        while True:
+            chunk = file.read(chunk_size)
+            if not chunk:
+                break
+            keywords.extend([k.strip() for k in chunk.replace('\n', ',').split(',') if k.strip()])
+    
+    # Filter out duplicates to reduce processing load
+    keywords = list(dict.fromkeys(keywords))
+    
+    print(f"Loaded {len(keywords)} unique keywords")
+    
+    # Generate thesaurus file with batching
+    generator = ThesaurusGenerator(similarity_threshold=0.75, batch_size=500)
+    num_entries = generator.generate_thesaurus_file(','.join(keywords), 'vosviewer_thesaurus.txt')
     print(f"Generated thesaurus file with {num_entries} entries")
 
 if __name__ == "__main__":
