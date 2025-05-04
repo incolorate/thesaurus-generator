@@ -141,7 +141,7 @@ def main():
     keywords = []
     chunk_size = 10000  # Adjust based on your file size and available memory
     
-    with open('test.txt', 'r') as file:
+    with open('keywords.txt', 'r') as file:
         while True:
             chunk = file.read(chunk_size)
             if not chunk:
